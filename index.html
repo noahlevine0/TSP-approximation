@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Farm Delivery Optamizer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        #graph-container { 
+            position: relative; 
+            height: 400px; 
+            background: white; 
+            cursor: crosshair; 
+            border: 1px solid #dee2e6;
+            overflow: hidden;
+        }
+        .grid-lines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .grid-line {
+            position: absolute;
+            background: #f8f9fa;
+        }
+        .grid-line.vertical {
+            width: 1px;
+            height: 100%;
+        }
+        .grid-line.horizontal {
+            width: 100%;
+            height: 1px;
+        }
+        .point { 
+            position: absolute; 
+            width: 12px; 
+            height: 12px; 
+            background: #212529; 
+            border-radius: 50%; 
+            transform: translate(-6px, -6px); 
+        }
+        .tour-path { 
+            position: absolute; 
+            background: #dc3545; 
+            height: 2px; 
+            transform-origin: 0 0; 
+        }
+        .point-label {
+            position: absolute;
+            font-size: 12px;
+            background: white;
+            padding: 0 4px;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+        }
+        .origin-marker {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: #0d6efd;
+            border-radius: 50%;
+            transform: translate(-5px, -5px);
+            z-index: 10;
+        }
+        .zoom-controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-4">
+        <div class="card shadow-sm">
+            <div class="card-body p-4">
+                <h1 class="text-center mb-4">Farm Delivery Optimizer</h1>
+                
+                <div class="row mb-4">
+                    <div class="col-md-8">
+                        <label class="form-label">Coordinates:</label>
+                        <textarea id="coordsInput" class="form-control mb-2" rows="3" 
+                            placeholder="Example: (1,2), (3,4) or click the graph to add points"></textarea>
+                    </div>
+                    <div class="col-md-4 d-flex flex-column">
+                        <button id="calculateBtn" class="btn btn-primary mb-2">
+                            Calculate Tour
+                        </button>
+                        <button id="clearBtn" class="btn btn-outline-secondary">
+                            Clear All
+                        </button>
+                    </div>
+                </div>
+
+                <div id="graph-container">
+                    <div class="grid-lines" id="gridLines"></div>
+                    <div class="origin-marker" title="Origin (0,0)"></div>
+                    <div class="zoom-controls btn-group">
+                        <button id="zoomInBtn" class="btn btn-sm btn-outline-primary">+</button> <!-- these are the button layouts -->
+                        <button id="zoomOutBtn" class="btn btn-sm btn-outline-primary">-</button>
+                        <button id="zoomResetBtn" class="btn btn-sm btn-outline-primary">Reset</button>
+                    </div>
+                </div>
+                
+                <div id="result" class="card bg-white mt-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Optimal Tour</h5>
+                        <div id="tourPath" class="mb-2"></div>
+                        <div id="tourDistance" class="text-success fw-bold"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const graph = document.getElementById('graph-container');
+        const gridLines = document.getElementById('gridLines');
+        const coordsInput = document.getElementById('coordsInput');
+        let points = [];
+        const baseGridSize = 40; //pixels between grid lines at zoom 1x
+        let currentZoom = 1;
+        const maxZoom = 4;
+        const minZoom = 0.5;
+
+        //drawing the grid lines
+        function drawGridLines() {
+            gridLines.innerHTML = '';
+            const centerX = graph.clientWidth / 2;
+            const centerY = graph.clientHeight / 2;
+            const visibleRange = Math.max(
+                Math.ceil(graph.clientWidth / (baseGridSize * currentZoom)),
+                Math.ceil(graph.clientHeight / (baseGridSize * currentZoom))
+            ) + 1;
+
+            //vertical grid lines
+            for (let x = -visibleRange; x <= visibleRange; x++) {
+                const line = document.createElement('div');
+                line.className = 'grid-line vertical';
+                const pos = toScreen(x, 0);
+                line.style.left = `${Math.round(pos.x)}px`;
+                gridLines.appendChild(line);
+            }
+
+            //horizontal grid lines
+            for (let y = -visibleRange; y <= visibleRange; y++) {
+                const line = document.createElement('div');
+                line.className = 'grid-line horizontal';
+                const pos = toScreen(0, y);
+                line.style.top = `${Math.round(pos.y)}px`;
+                gridLines.appendChild(line);
+            }
+        }
+
+        //converting coordinates to screen pixels (then used in addPoints)
+        function toScreen(x, y) {
+            const centerX = graph.clientWidth / 2;
+            const centerY = graph.clientHeight / 2;
+            return {
+                x: centerX + x * baseGridSize * currentZoom,
+                y: centerY - y * baseGridSize * currentZoom
+            };
+        }
+
+        //convert screen pixels to coordaintes (then used in addPoints)
+        function toGrid(screenX, screenY) { 
+            const centerX = graph.clientWidth / 2;
+            const centerY = graph.clientHeight / 2;
+            return {
+                x: Math.round((screenX - centerX) / (baseGridSize * currentZoom)),
+                y: Math.round((centerY - screenY) / (baseGridSize * currentZoom))
+            };
+        }
+
+        //this adds points to grid
+        function addPoint(screenX, screenY) {
+            if (document.elementFromPoint(screenX, screenY).closest('.zoom-controls')) return;
+            
+            const rect = graph.getBoundingClientRect();
+            const gridCoords = toGrid(screenX - rect.left, screenY - rect.top);
+            
+            if (!points.some(p => p.x === gridCoords.x && p.y === gridCoords.y)) { //if any point takes the form of the coordinates, add it
+                points.push(gridCoords);
+                renderPoints(); //always rerender the points after adding a point
+                updateInput();
+            }
+        }
+
+        //rendering the points
+        function renderPoints() {
+            //clear all preivous points 
+            document.querySelectorAll('.point, .point-label, .tour-path').forEach(el => {
+                if (!el.classList.contains('origin-marker') && 
+                    !el.classList.contains('zoom-controls') &&
+                    !el.classList.contains('grid-lines')) {
+                    el.remove(); //clear the visual graph
+                }
+            });
+            
+            const originPos = toScreen(0, 0);
+            document.querySelector('.origin-marker').style.left = `${Math.round(originPos.x)}px`;
+            document.querySelector('.origin-marker').style.top = `${Math.round(originPos.y)}px`;
+
+            //redraw grid lines
+            drawGridLines();
+
+            //render the points
+            points.forEach((point, i) => {
+                const pos = toScreen(point.x, point.y);
+                
+                //make a point
+                const pointEl = document.createElement('div');
+                pointEl.className = 'point';
+                pointEl.style.left = `${Math.round(pos.x)}px`;
+                pointEl.style.top = `${Math.round(pos.y)}px`;
+                graph.appendChild(pointEl);
+                
+                //creating a label
+                const label = document.createElement('div');
+                label.className = 'point-label';
+                label.textContent = `${i+1}`;
+                label.style.left = `${Math.round(pos.x) + 10}px`;
+                label.style.top = `${Math.round(pos.y) + 10}px`;
+                graph.appendChild(label);
+            });
+        }
+
+        //draw the tour path
+        function drawTour(tour) {
+            document.querySelectorAll('.tour-path').forEach(el => el.remove());
+            
+            for (let i = 0; i < tour.length - 1; i++) {
+                const p1 = tour[i];
+                const p2 = tour[i+1];
+                const pos1 = toScreen(p1.x, p1.y);
+                const pos2 = toScreen(p2.x, p2.y);
+                
+                const path = document.createElement('div');
+                path.className = 'tour-path';
+                path.style.width = `${Math.hypot(pos2.x-pos1.x, pos2.y-pos1.y)}px`; //use euclidean distance (dist formula to calculate)
+                path.style.left = `${Math.round(pos1.x)}px`;
+                path.style.top = `${Math.round(pos1.y)}px`;
+                path.style.transform = `rotate(${Math.atan2(pos2.y-pos1.y, pos2.x-pos1.x)}rad)`;
+                graph.appendChild(path);
+            }
+        }
+
+        //putitng coordinates in the text area
+        function updateInput() {
+            coordsInput.value = points.map(p => `(${p.x},${p.y})`).join(', '); //join coordinates by comma
+        }
+
+        //parsing text from the textbox(provides output)
+        function parseInput() {
+            const text = coordsInput.value.trim();
+            if (!text) return [];
+            
+            const coords = [];
+            const regex = /\((-?\d+)\s*,\s*(-?\d+)\)/g; //this parses coordinate strings (integers)
+            let match;
+            
+            while ((match = regex.exec(text)) !== null) {
+                coords.push({x: parseInt(match[1]), y: parseInt(match[2])});
+            }
+            
+            return coords;
+        }
+
+        //how it responds to actions
+        graph.addEventListener('click', (e) => { //if you click on graph, add an x and y coordinate
+            addPoint(e.clientX, e.clientY);
+        });
+
+        document.getElementById('calculateBtn').addEventListener('click', async () => {
+            if (points.length === 0) points = parseInput(); 
+            if (points.length < 2) return alert("input at least 2 points please");
+            
+            try {
+                const response = await fetch('http://localhost:3000/calculate-tour', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ points })
+                });
+                const result = await response.json();
+                
+                document.getElementById('tourPath').textContent = //updating text to have the tour formatting
+                    result.tour.map((p,i) => `${i+1}. (${p.x},${p.y})`).join(' → '); //tour output
+                document.getElementById('tourDistance').textContent = 
+                    `Total distance: ${result.totalDistance.toFixed(2)} units`;
+                
+                drawTour(result.tour);
+            } catch {
+                alert("Error with tour calculation");
+            }
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            points = []; //reset points array
+            coordsInput.value = '';
+            document.querySelectorAll('.point, .point-label, .tour-path').forEach(el => el.remove());
+            document.getElementById('tourPath').textContent = '';
+            document.getElementById('tourDistance').textContent = '';
+            currentZoom = 1;
+            renderPoints(); //rerender 'points' (nothing)
+        });
+
+        //these are the controls for the zoom out and zoom in buttons
+        document.getElementById('zoomInBtn').addEventListener('click', (e) => {
+            e.stopPropagation(); //makes it specifically so onlythis button is ppressed upon click
+            if (currentZoom < maxZoom) {
+                currentZoom *= 2;
+                renderPoints();
+            }
+        });
+
+        document.getElementById('zoomOutBtn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (currentZoom > minZoom) {
+                currentZoom /= 2;
+                renderPoints();
+            }
+        });
+
+        document.getElementById('zoomResetBtn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            currentZoom = 1;
+            renderPoints();
+        });
+
+        //handling resize
+        window.addEventListener('resize', () => {
+            renderPoints();
+        });
+
+        renderPoints();
+    </script>
+</body>
+</html>
